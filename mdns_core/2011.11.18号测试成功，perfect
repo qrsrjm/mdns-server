@@ -1,0 +1,4 @@
+1.把mdns_core修改了，现在要添加服务，只要修改mdns_responser文件中的mdns_responser.c中的SERVICE[]表就可以了，然后在把mdns_core中的mdns.h
+中的SERVICE_NUM修改就OK了。
+2.如果添加的服务在service_txt_table[]和service_port_table[],service_tcp_table[]中没有的话则要添加进去。
+

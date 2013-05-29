@@ -1,0 +1,539 @@
+
+/**********************************************************************************************************************
+*filename	：mdns_txt.c
+*time    	:2011.11.17
+*author  	:冀博
+*desribe     	:实现了TXT资源记录中的HTTP，WEB-DAV,LXI,VXI-11,Device-Info,SCPI-RAW,SCPI_TELNET;关于NI协议中如何实现目前不清楚
+		 具体请查看：SRV(RFC 2782)和LXI Device Specification 2011(10章节)
+*modifier:冀博
+*                  函数
+**********************************************************************************************************************/
+#include<stdio.h>
+#include<string.h>
+#include<netinet/in.h>
+#include<stdlib.h>
+#include<sys/stat.h>
+#include<sys/types.h>
+#include<fcntl.h>
+#include<errno.h>
+#include "mdns.h"
+#include "mdns_core.h"
+#include "../mdns_socket/mdns_socket.h"
+
+char *split(char *s,char stop);
+int  Get_Dev_IDN(char *manufact,char *model,char *serial_num,char *firm_verion);
+uint16 Do_TXT_Data(const char *data,TXTData *txt_data);
+uint16 mDNS_TXT_Http(TXTData *txt_data);
+uint16 mDNS_TXT_Webdav(TXTData *txt_data);
+uint16 mDNS_TXT_Device_Info(TXTData *txt_data);
+uint16 mDNS_TXT_LXI(TXTData *txt_data);
+uint16 mDNS_TXT_VXI_11(TXTData *txt_data);
+uint16 mDNS_TXT_SCPI_RAW(TXTData *txt_data);
+uint16 mDNS_TXT_SCPI_TELNET(TXTData *txt_data);
+uint16 mDNS_TXT_NI_RT(TXTData *txt_data);
+uint16 mDNS_TXT_NI(TXTData *txt_data);
+uint16 mDNS_TXT_NI_SYSAPI(TXTData *txt_data);
+/*****************************************函数*********************************************************/
+
+
+/*函数功能	：完成对字符串s中的stop字符进行分隔，将前半部分返回，将后半部分存放在原先的指针。
+1.函数名字	：char *split(char *s,char stop)
+2.函数形参	:
+	   	char   *s:存放字符串
+	   	char   stop:存放分隔符
+3.函数返回值	：
+	  	 函数执行成功后，返回分隔符的前半部分。
+4.time:2011.10.11
+5.author:冀博
+6.2011.10.11测试成功
+*/
+char *split(char *s,char stop)
+{
+	char *data;
+	char *tmp;
+	int i,len,j;
+	len = strlen(s);
+	tmp = s;
+	data = (char *)malloc(sizeof(char)*len+1);
+	
+	for(i = 0;i < len;i++){
+		
+		if(stop != s[i]){
+		
+			data[i] = s[i];
+		} else {
+			
+			i +=1;
+			break;
+		}
+	}
+	if(len == i)
+		data[i] = '\0';
+	else
+		data[i-1]='\0';
+	for(j = i;j < len;j++)
+		s[j-i] = tmp[j];
+	s[len-i] = '\0';
+	return data;
+}
+/*函数功能	：获取设备的*IDN,将其分别放入manufact,model,serial_num,firm_verion中
+	  	将*IDN?中的第一部分放入manufact中
+	  	将*IDN?中的第二部分放入model中
+	  	将*IDN？中的第三部分放入serial_num中
+	  	将*IDN？中的第四部分放入firm_verion中
+1.函数名字	：char *split(char *s,char stop)
+2.函数形参	:
+	   	char   *s:存放字符串
+	   	char   stop:存放分隔符
+3.函数返回值	：
+	  	 函数执行成功后返回1；
+	   	函数执行错误后返回-1.
+4.time:2011.10.11
+5.author:冀博
+6.2011.10.11测试成功
+*/
+
+int  Get_Dev_IDN(char *manufact,char *model,char *serial_num,char *firm_verion)
+{
+//	 #define DEBUG_Get_Dev_IDN
+
+	 
+	 char buffer[MAX_TXT_DATA];
+	 int   fd;
+	 int   ret;
+	 int   i;
+	 char  *tmp;
+	 fd = open("/dev/usbtmc0",O_RDWR);
+	 if (fd < 0){
+		printf("OPEN /dev/usbtmc0 FAILED\n");		
+		return  -1;
+	} else {
+		#ifdef DEBUG_Get_Dev_IDN
+		printf("OPEN /dev/usbtmc0 SUCESS\n");
+		#endif
+	}
+	ret = write(fd,"*IDN?\n",6);
+	if(0==ret){
+		printf("write error\n");		
+		return -1;
+	} else {
+		#ifdef DEBUG_Get_Dev_IDN
+		printf("write *IDN? SUCESS\n");
+		#endif
+	}
+	ret = read(fd,buffer,500);
+	if(ret ==0){
+		printf("read error\n");		
+		return -1;
+	} else {
+		#ifdef DEBUG_Get_Dev_IDN
+		printf("read /dev/usbtmc0 SUCESS\n");
+		#endif
+	}
+	buffer[ret] ='\0';
+	if(ret >= MAX_TXT_DATA){
+		printf("Read Device *IDN Data Too Long\n");
+		exit(1);
+	}
+	tmp = split(buffer,',');
+	strcpy(manufact,tmp);
+	tmp = split(buffer,',');
+	strcpy(model,tmp);
+	tmp = split(buffer,',');
+	strcpy(serial_num,tmp);
+	strcpy(firm_verion,buffer);
+	
+	return 1;	
+}
+
+/*函数功能	：将字符形data数据转换为TXT形式的数据，返回TXT数据长度
+1.函数名字	：uint16 Do_TXT_Data(const char *data,TXTData *txt_data)
+2.函数形参	:
+		1>char 		*data   ：存放字符型TXT数据
+		2>TXTData 	*txtdata:存放TXT资源记录数据
+3.函数返回值	：
+ 		函数成功后返回TXT资源数据长度。
+		TXT数据过长则返回错误0
+4.time:2011.11.9
+5.author:冀博
+早上测试
+*/
+uint16 Do_TXT_Data(const char *data,TXTData *txt_data)
+{
+	
+//	#define  DEBUG_Do_TXT_Data	
+	uint16 len;
+	uint16 data_length;
+	int i=0;
+	for (;;) {
+        	 if(*data == '\0')
+			break;	
+		 len  = strcspn(data, ",");
+        	 if (len > MAX_LABEL){	  
+		 	return 0;
+		 } else if( 0 == len){
+		    	break;
+		 } else {
+        		txt_data->c[i] = len;
+			memcpy(&(txt_data->c[1+i]),data,len);
+			data += len;
+                        i += len+1;
+			if( !*data)
+				break;//没有末尾的dot
+			data++;//跨过.
+			if(!*data)
+				break;		
+		}
+      }
+      data_length = i;//实际长度
+      if( data_length >  MAX_TXT_DATA ){//  MAX_TXT_DATA为TXT数据的最大长度
+   	  	printf("In Do_TXT_Data() TXT Data Too Long\n");
+	  	return 0;	
+      }
+      #ifdef DEBUG_Do_TXT_Data
+      printf("*************************DEBUG_Do_TXT_Data*****************************\n");
+      uint8  test[MAX_TXT_DATA];
+      uint8  j;
+      memset(test,0,sizeof(test));//初始化为0。
+      memcpy(test,txt_data->c,data_length);
+      printf("data_length:%d\n",data_length);
+      for(j=0;j < data_length;j++){
+			if( 0 == j%5){
+			printf("\n");
+			}		
+			printf("test[%d]=0x%x\t",j,test[j]);
+		}
+	printf("\n");
+	printf("*************************Exit DEBUG_Do_TXT_Data****************************\n");
+	#endif
+     
+      return data_length;
+	
+}
+/*函数功能	：处理HTTP协议
+1.函数名字	：uint16 mDNS_TXT_Http(TXTData *txt_data)
+2.函数形参	:
+		TXTData 	*txtdata:存放TXT资源记录数据
+3.函数返回值：
+ 		函数成功后返回TXT资源数据长度
+		函数执行错误，抛出异常
+4.time:2011.11.9
+5.author:冀博
+*/
+uint16 mDNS_TXT_Http(TXTData *txt_data)
+{
+//	#define  DEBUG_mDNS_TXT_Http	
+	char  data[MAX_TXT_DATA];
+	char  path[] = "path=/";
+	uint16  data_leng;
+	sprintf(data,"%s,%s",TXT_VERSION,path);
+	data_leng = Do_TXT_Data(data,txt_data);
+	if(0 == data_leng){//TXT资源处理函数中就不进行处理错误。
+		printf("mDNS_TXT_Http() Error,data_leng too long\n");
+		exit(1);
+	}
+	#ifdef DEBUG_mDNS_TXT_Http
+      	printf("*************************DEBUG_TXT_Http*****************************\n");
+	printf("data leng=%d\n",data_leng);	
+	printf("data:%s\n",data);
+	#endif
+	return data_leng;
+}
+/*函数功能	：处理web协议的TXT数据
+1.函数名字	：uint16 mDNS_TXT_Webdav(TXTData *txt_data)
+2.函数形参	:
+	 	TXTData 	*txtdata:存放TXT资源记录数据
+说明：使用,作为分隔符号
+3.函数返回值	：
+ 		函数成功后返回TXT资源数据长度。
+		函数执行错误，抛出异常；
+4.time:2011.11.9
+5.author:冀博
+*/
+uint16 mDNS_TXT_Webdav(TXTData *txt_data)
+{
+//         #define  DEBUG_mDNS_TXT_Webdav
+     
+	char  data[MAX_TXT_DATA];
+	char  path[] = "path=/";
+	uint16  data_leng;
+	sprintf(data,"%s,%s",TXT_VERSION,path);//
+	data_leng = Do_TXT_Data(data,txt_data);
+	if(0 == data_leng){//TXT资源处理函数中就不进行处理错误。
+		printf("mDNS_TXT_Webdav() Error,data_leng too long\n");
+		exit(1);
+	}
+	#ifdef DEBUG_mDNS_TXT_Webdav
+      	printf("*************************DEBUG_TXT_Webdav*****************************\n");
+	printf("data leng=%d\n",data_leng);	
+	printf("data:%s\n",data);
+	#endif
+	return data_leng;
+}
+/*函数功能	：处理device-info协议的TXT数据，用来存放设备的信息(目前没有使用，存放的是空)
+1.函数名字	：uint16 mDNS_TXT_Device_Info(TXTData *txt_data)
+2.函数形参:
+		TXTData 	*txt_data:存放TXT资源记录数据
+说明：
+3.函数返回值：
+ 函数成功后返回TXT资源数据长度。
+4.time:2011.11.9
+5.author:冀博
+*/
+uint16 mDNS_TXT_Device_Info(TXTData *txt_data)
+{
+	
+        txt_data->c[0]='\0';//没有实现；	  
+	return  1;
+}
+
+
+/*函数功能	：函数完成对TXT资源记录中的LXI协议数据的处理
+1.函数名字	：uint16 mDNS_TXT_LXI(TXTData *txt_data)
+2.函数形参:
+		TXTData 	*txt_data:存放TXT资源记录数据
+3.函数返回值：
+ 		函数成功后返回TXT资源数据长度。
+ 		函数执行错误抛出异常
+4.time:2011.11.9
+5.author:冀博
+*/
+uint16 mDNS_TXT_LXI(TXTData *txt_data)
+{
+//	#define DEBUG_mDNS_TXT_LXI
+	uint16  data_leng;		 
+	int     ret;
+	char    data[MAX_TXT_DATA];
+	char    manufact[MAX_TXT_DATA];
+	char    model[MAX_TXT_DATA];
+	char    serial_num[MAX_TXT_DATA];
+	char    firm_verion[MAX_TXT_DATA];
+	ret  = Get_Dev_IDN(manufact,model,serial_num,firm_verion);
+	if(ret < 0){
+		txt_data->c[0]='\0';//默认为空
+		data_leng = 1;
+		#ifdef DEBUG_mDNS_TXT_LXI
+		printf("*************************DEBUG mDNS_TXT_LXI*****************************\n");
+		printf("NO Device:\n");
+		#endif
+	} else {
+		sprintf(data,"%s.Manufactureer=%s,Model=%s,SerialNumber=%s,FirmwareVersion=%s",TXT_VERSION,manufact,model,serial_num,firm_verion);
+		data_leng = Do_TXT_Data(data,txt_data);
+		if(0 == data_leng){//TXT资源处理函数中就不进行处理错误。
+			printf("mDNS_TXT_LXI（） Error,data_leng too long\n");
+			exit(1);
+		}
+		#ifdef DEBUG_mDNS_TXT_LXI
+		printf("*************************DEBUG mDNS_TXT_LXI*****************************\n");
+		printf("Find Device:\n");		
+		#endif
+	}		
+	#ifdef DEBUG_mDNS_TXT_LXI
+	printf("data leng=%d\n",data_leng);
+	printf("DATA:%s",data);
+	printf("\n");
+	printf("*************************Exit DEBUG mDNS_TXT_LXI*****************************\n");
+	#endif 
+	return  data_leng;
+}
+
+/*函数功能	：函数完成对TXT资源记录中的VXI-11协议数据的处理
+1.函数名字	：uint16 mDNS_TXT_VXI_11(TXTData *txt_data)
+2.函数形参:
+		TXTData 	*txt_data:存放TXT资源记录数据
+3.函数返回值：
+ 		函数成功后返回TXT资源数据长度。
+ 		函数执行错误抛出异常
+4.time:2011.11.9
+5.author:冀博
+*/
+uint16 mDNS_TXT_VXI_11(TXTData *txt_data)
+{
+//	#define DEBUG_mDNS_TXT_VXI_11	
+	uint16  data_leng;		 
+	int     ret;
+	char    data[MAX_TXT_DATA];
+	char    manufact[MAX_TXT_DATA];
+	char    model[MAX_TXT_DATA];
+	char    serial_num[MAX_TXT_DATA];
+	char    firm_verion[MAX_TXT_DATA];
+	ret  = Get_Dev_IDN(manufact,model,serial_num,firm_verion);
+	if(ret < 0){
+		txt_data->c[0]='\0';//默认为空
+		data_leng = 1;
+		#ifdef DEBUG_mDNS_TXT_VXI_11
+		printf("*************************DEBUG mDNS_TXT_VXI_11*****************************\n");
+		printf("NO Device:\n");
+		#endif
+	} else {
+		
+		sprintf(data,"%s.Manufactureer=%s,Model=%s,SerialNumber=%s,FirmwareVersion=%s",TXT_VERSION,manufact,model,serial_num,firm_verion);
+		data_leng = Do_TXT_Data(data,txt_data);
+		if(0 == data_leng){//TXT资源处理函数中就不进行处理错误。
+			printf("mDNS_TXT_VXI_11（） Error,data_leng too long\n");
+			exit(1);
+		}
+		#ifdef DEBUG_mDNS_TXT_VXI_11
+		printf("*************************DEBUG mDNS_TXT_VXI_11*****************************\n");
+		printf("Find Device:\n");		
+		#endif
+	}		
+	#ifdef DEBUG_mDNS_TXT_VXI_11
+	printf("data leng=%d\n",data_leng);
+	printf("DATA:%s",data);
+	printf("\n");
+	printf("*************************Exit DEBUG mDNS_TTXT_VXI_11*****************************\n");
+	#endif 
+	return  data_leng;
+}
+
+/*函数功能	：函数完成对TXT资源记录中的SCPI-RAW协议数据的处理
+1.函数名字	：uint16 mDNS_TXT_SCPI_RAW(TXTData *txt_data)
+2.函数形参:
+		TXTData 	*txt_data:存放TXT资源记录数据
+3.函数返回值：
+ 		函数成功后返回TXT资源数据长度。
+ 		函数执行错误抛出异常
+4.time:2011.11.9
+5.author:冀博
+*/
+uint16 mDNS_TXT_SCPI_RAW(TXTData *txt_data)
+{
+		
+//	#define DEBUG_mDNS_TXT_SCPI_RAW	
+	uint16  data_leng;		 
+	int     ret;
+	char    data[MAX_TXT_DATA];
+	char    manufact[MAX_TXT_DATA];
+	char    model[MAX_TXT_DATA];
+	char    serial_num[MAX_TXT_DATA];
+	char    firm_verion[MAX_TXT_DATA];
+	ret  = Get_Dev_IDN(manufact,model,serial_num,firm_verion);
+	if(ret < 0){
+		txt_data->c[0]='\0';//默认为空
+		data_leng = 1;
+		#ifdef DEBUG_mDNS_TXT_SCPI_RAW
+		printf("*************************DEBUG mDNS_TXT_SCPI_RAW*****************************\n");
+		printf("NO Device:\n");
+		#endif
+	} else {
+		
+		sprintf(data,"%s.Manufactureer=%s,Model=%s,SerialNumber=%s,FirmwareVersion=%s",TXT_VERSION,manufact,model,serial_num,firm_verion);
+		data_leng = Do_TXT_Data(data,txt_data);
+		if(0 == data_leng){//TXT资源处理函数中就不进行处理错误。
+			printf("mDNS_TXT_SCPI_RAW（） Error,data_leng too long\n");
+			exit(1);
+		}
+		#ifdef DEBUG_mDNS_TXT_SCPI_RAW
+		printf("*************************DEBUG mDNS_TXT_SCPI_RAW*****************************\n");
+		printf("Find Device:\n");		
+		#endif
+	}		
+	#ifdef DEBUG_mDNS_TXT_SCPI_RAW
+	printf("data leng=%d\n",data_leng);
+	printf("DATA:%s",data);
+	printf("\n");
+	printf("*************************Exit DEBUG mDNS_TXT_SCPI_RAW*****************************\n");
+	#endif 
+	return  data_leng;
+}
+
+/*函数功能	：函数完成对TXT资源记录中的SCPI-TELENT协议数据的处理
+1.函数名字	：uint16 mDNS_TXT_SCPI_TELNET(TXTData *txt_data)
+2.函数形参:
+		TXTData 	*txt_data:存放TXT资源记录数据
+3.函数返回值：
+ 		函数成功后返回TXT资源数据长度。
+ 		函数执行错误抛出异常
+4.time:2011.11.9
+5.author:冀博
+*/
+uint16 mDNS_TXT_SCPI_TELNET(TXTData *txt_data)
+{
+//	#define DEBUG_mDNS_TXT_SCPI_TELNET	
+	uint16  data_leng;		 
+	int     ret;
+	char    data[MAX_TXT_DATA];
+	char    manufact[MAX_TXT_DATA];
+	char    model[MAX_TXT_DATA];
+	char    serial_num[MAX_TXT_DATA];
+	char    firm_verion[MAX_TXT_DATA];
+	ret  = Get_Dev_IDN(manufact,model,serial_num,firm_verion);
+	if(ret < 0){
+		txt_data->c[0]='\0';//默认为空
+		data_leng = 1;
+		#ifdef DEBUG_mDNS_TXT_SCPI_TELNET
+		printf("*************************DEBUG mDNS_TXT_SCPI_TELNET*****************************\n");
+		printf("NO Device:\n");
+		#endif
+	} else {
+		
+		sprintf(data,"%s.Manufactureer=%s,Model=%s,SerialNumber=%s,FirmwareVersion=%s",TXT_VERSION,manufact,model,serial_num,firm_verion);
+		data_leng = Do_TXT_Data(data,txt_data);
+		if(0 == data_leng){//TXT资源处理函数中就不进行处理错误。
+			printf("mDNS_TXT_SCPI_TELNET（） Error,data_leng too long\n");
+			exit(1);
+		}
+		#ifdef DEBUG_mDNS_TXT_SCPI_TELNET
+		printf("*************************DEBUG mDNS_TXT_SCPI_TELNET*****************************\n");
+		printf("Find Device:\n");		
+		#endif
+	}		
+	#ifdef DEBUG_mDNS_TXT_SCPI_TELNET
+	printf("data leng=%d\n",data_leng);
+	printf("DATA:%s",data);
+	printf("\n");
+	printf("*************************Exit DEBUG mDNS_TXT_SCPI_TELNET*****************************\n");
+	#endif 
+	return  data_leng;
+}
+
+/*函数功能	：函数完成对TXT资源记录中的NI-RT协议数据的处理(目前没有实现，数据为空)
+1.函数名字	：uint16 mDNS_TXT_NI_RT(TXTData *txt_data)
+2.函数形参:
+		TXTData 	*txt_data:存放TXT资源记录数据
+3.函数返回值：
+ 		函数成功后返回TXT资源数据长度。
+ 		函数执行错误抛出异常
+4.time:2011.11.9
+5.author:冀博
+*/
+uint16 mDNS_TXT_NI_RT(TXTData *txt_data)
+{
+	 txt_data->c[0]='\0';//没有实现；	  
+	 return  1;
+}
+
+/*函数功能	：函数完成对TXT资源记录中的NI协议数据的处理(目前没有实现，数据为空)
+1.函数名字	：uint16 mDNS_TXT_NI(TXTData *txt_data)
+2.函数形参:
+		TXTData 	*txt_data:存放TXT资源记录数据
+3.函数返回值：
+ 		函数成功后返回TXT资源数据长度。
+ 		函数执行错误抛出异常
+4.time:2011.11.9
+5.author:冀博
+*/
+
+uint16 mDNS_TXT_NI(TXTData *txt_data)
+{
+	 txt_data->c[0]='\0';//没有实现；	  
+	return  1;
+}
+
+/*函数功能	：函数完成对TXT资源记录中的NI-SYSAPI协议数据的处理(目前没有实现，数据为空)
+1.函数名字	：uint16  mDNS_TXT_NI_SYSAPI(TXTData *txt_data)
+2.函数形参:
+		TXTData 	*txt_data:存放TXT资源记录数据
+3.函数返回值：
+ 		函数成功后返回TXT资源数据长度。
+ 		函数执行错误抛出异常
+4.time:2011.11.9
+5.author:冀博
+*/
+
+uint16 mDNS_TXT_NI_SYSAPI(TXTData *txt_data)
+{
+	 txt_data->c[0]='\0';//没有实现；	  
+	 return  1;
+}
